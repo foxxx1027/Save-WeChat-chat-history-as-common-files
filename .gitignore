@@ -1,0 +1,17 @@
+# 构建产物（pack.sh 重新生成）
+dist/
+
+# 本机导出的聊天记录（绝不入库）
+wxdump-exports/
+exports/
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 解密缓存 / 密钥（仅存在各机器 ~/.wxdump/，防御性排除）
+*.key
+passphrase*
+db_keys*

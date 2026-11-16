@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>wxdump — 微信聊天记录导出</title>
+<style>
+  :root{--bg:#0f1115;--card:#171a21;--line:#262b36;--txt:#e6e9ef;--dim:#8b93a3;--acc:#4f8cff;--ok:#3fb96f;--warn:#e6a23c;--err:#e5556b}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font:14px/1.6 -apple-system,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;padding:24px}
+  .wrap{max-width:1100px;margin:0 auto}
+  h1{font-size:20px;margin-bottom:4px} .sub{color:var(--dim);margin-bottom:20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+  .card h2{font-size:15px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  .pill{padding:2px 10px;border-radius:99px;font-size:12px;border:1px solid var(--line)}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+  button{background:var(--acc);color:#fff;border:none;border-radius:6px;padding:8px 18px;cursor:pointer;font-size:14px}
+  button:hover{filter:brightness(1.1)} button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
+  input[type=text]{background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--txt);padding:8px 12px;flex:1;min-width:200px}
+  .list{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:10px}
+  .citem{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+  .citem:hover{background:#1d222c}
+  .cname{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cmeta{color:var(--dim);font-size:12px;white-space:nowrap}
+  .badge{font-size:11px;padding:1px 8px;border-radius:4px;background:#232a38;color:var(--dim)}
+  .fcheck{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid var(--line);border-radius:6px;cursor:pointer}
+  .fcheck input{accent-color:var(--acc)}
+  #progress{color:var(--dim);margin-top:8px;font-size:13px}
+  .files a{color:var(--acc);text-decoration:none;display:block;margin-top:4px}
+  .steps{color:var(--dim);font-size:13px;margin:8px 0}
+  .steps b{color:var(--txt)}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--acc);border-top-color:transparent;border-radius:50%;animation:r 1s linear infinite}
+  @keyframes r{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>wxdump · 微信聊天记录导出</h1>
+  <div class="sub">仅限本人设备 · 本人账号数据 · 本地处理不上传</div>
+
+  <div class="card">
+    <h2>① 环境状态 <span id="statusTag"></span></h2>
+    <div id="statusBox" class="row">加载中…</div>
+    <div id="captureBox" style="margin-top:12px;display:none">
+      <div class="steps">抓取密钥需要触发条件：<b>在微信中退出账号 → 重新扫码登录</b>（不是退出微信程序）。点击开始后操作即可。</div>
+      <div class="row">
+        <button id="btnCapture" onclick="startCapture()">开始抓取密钥</button>
+        <span id="captureState" class="dim"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>② 选择联系人 <span id="contactCount" class="badge"></span></h2>
+    <div class="row">
+      <input type="text" id="search" placeholder="搜索名称 / 备注 / wxid…" oninput="renderContacts()">
+      <button class="ghost" onclick="selectAll(true)">全选</button>
+      <button class="ghost" onclick="selectAll(false)">清空</button>
+    </div>
+    <div id="contactList" class="list">先完成密钥状态检查</div>
+  </div>
+
+  <div class="card">
+    <h2>③ 导出</h2>
+    <div class="row" id="formatRow"></div>
+    <div class="row" style="margin-top:12px">
+      <button id="btnExport" onclick="startExport()">导出所选（<span id="selCount">0</span>）</button>
+      <label class="fcheck"><input type="checkbox" id="zipCheck"> 打包为 zip</label>
+      <span id="exportState"></span>
+    </div>
+    <div id="progress"></div>
+    <div class="files" id="files"></div>
+  </div>
+</div>
+
+<script>
+let contacts=[], selected=new Set(), timer=null, expTimer=null;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function jget(u){const r=await fetch(u);return r.json()}
+async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});return r.json()}
+
+async function loadStatus(){
+  try{
+    const s=await jget('/api/status');
+    const box=$('statusBox'); box.innerHTML='';
+    const add=(cls,txt)=>{const el=document.createElement('span');el.className='pill '+cls;el.textContent=txt;box.appendChild(el)};
+    add(s.ready?'ok':'warn', s.ready?`账号 ${s.account||''}`:'未找到账号');
+    add(s.passphrase_cached?'ok':'warn', s.passphrase_cached?'密钥已缓存':'密钥未抓取');
+    add(s.keys_cached>0?'ok':'warn', `已解锁 ${s.keys_cached} 库`);
+    s.prerequisites?.forEach(p=>add('err',p));
+    $('statusTag').innerHTML=s.ready&&s.keys_cached>0?'<span class="ok">● 就绪</span>':'<span class="warn">● 待准备</span>';
+    $('captureBox').style.display=s.keys_cached>0?'none':'block';
+    if(s.ready&&s.keys_cached>0)await loadContacts();
+  }catch(e){$('statusBox').textContent='服务异常: '+e}
+}
+
+async function startCapture(){
+  $('btnCapture').disabled=true;
+  const r=await jpost('/api/key/capture');
+  if(r.error){$('captureState').innerHTML='<span class="err">'+esc(r.error)+'</span>';$('btnCapture').disabled=false;return}
+  $('captureState').innerHTML='<span class="spin"></span> 等待你在微信中「退出账号 → 重新登录」…（最长 5 分钟）';
+  timer=setInterval(async()=>{
+    const s=await jget('/api/key/status');
+    if(s.error){clearInterval(timer);$('captureState').innerHTML='<span class="err">失败: '+esc(s.error)+'</span>';$('btnCapture').disabled=false;return}
+    if(s.done){clearInterval(timer);$('captureState').innerHTML='<span class="ok">✓ 密钥抓取成功</span>';loadStatus()}
+  },2000);
+}
+
+async function loadContacts(){
+  contacts=await jget('/api/contacts');
+  // 只显示有消息的 + 排序见后端
+  $('contactList').innerHTML=contacts.length?'':'<div style="padding:12px;color:var(--dim)">没有联系人</div>';
+  renderContacts();
+}
+function renderContacts(){
+  const q=$('search').value.trim().toLowerCase();
+  const list=$('contactList'); list.innerHTML='';
+  let shown=0;
+  for(const c of contacts){
+    if(q&&!(c.name+c.nick_name+c.remark+c.wxid).toLowerCase().includes(q))continue;
+    if(c.msg_count===0&&q==='')continue;
+    const div=document.createElement('div');div.className='citem';
+    div.innerHTML=`<input type="checkbox" ${selected.has(c.wxid)?'checked':''}>
+      <span class="cname">${esc(c.name)} <span class="cmeta">${esc(c.nick_name!==c.name?c.nick_name:'')}</span></span>
+      <span class="badge">${c.kind_name}</span><span class="cmeta">${c.msg_count} 条</span>`;
+    div.onclick=e=>{if(e.target.tagName!=='INPUT'){const cb=div.querySelector('input');cb.checked=!cb.checked}
+      const cb=div.querySelector('input');cb.checked?selected.add(c.wxid):selected.delete(c.wxid);updateSel()};
+    div.querySelector('input').onclick=e=>e.stopPropagation();
+    list.appendChild(div);shown++;
+    if(shown>=300)break;
+  }
+  $('contactCount').textContent=contacts.filter(c=>c.msg_count>0).length+' 个会话';
+  updateSel();
+}
+function selectAll(on){
+  const q=$('search').value.trim().toLowerCase();
+  for(const c of contacts){
+    if(c.msg_count===0)continue;
+    if(q&&!(c.name+c.nick_name+c.remark+c.wxid).toLowerCase().includes(q))continue;
+    on?selected.add(c.wxid):selected.delete(c.wxid);
+  }
+  renderContacts();
+}
+function updateSel(){$('selCount').textContent=selected.size}
+
+async function initFormats(){
+  const s=await jget('/api/status');
+  const names={csv:'CSV',txt:'TXT',docx:'Word',db:'SQLite .db',md:'Markdown',jsonl:'JSONL'};
+  $('formatRow').innerHTML=s.formats.map(f=>
+    `<label class="fcheck"><input type="checkbox" value="${f}" ${['txt','md'].includes(f)?'checked':''}> ${names[f]||f}</label>`).join('');
+}
+
+async function startExport(){
+  if(!selected.size){alert('请先选择联系人');return}
+  const formats=[...document.querySelectorAll('#formatRow input:checked')].map(i=>i.value);
+  if(!formats.length){alert('请选择导出格式');return}
+  $('btnExport').disabled=true;$('exportState').innerHTML='<span class="spin"></span>';
+  const r=await jpost('/api/export',{contacts:[...selected],formats,zip:$('zipCheck').checked});
+  if(r.error){$('exportState').innerHTML='<span class="err">'+esc(r.error)+'</span>';$('btnExport').disabled=false;return}
+  expTimer=setInterval(async()=>{
+    const s=await jget('/api/export/result');
+    $('progress').textContent=s.running?`[${s.current}/${s.total}] ${s.progress}`:s.progress||'';
+    if(!s.running){
+      clearInterval(expTimer);$('btnExport').disabled=false;
+      if(s.error){$('exportState').innerHTML='<span class="err">失败: '+esc(s.error)+'</span>';return}
+      $('exportState').innerHTML='<span class="ok">✓ 导出完成</span>';
+      $('files').innerHTML=s.files.map(f=>`<a href="/download?path=${encodeURIComponent(f)}">⬇ ${esc(f.split('/').pop())}</a>`).join('');
+    }
+  },1500);
+}
+
+loadStatus();initFormats();
+</script>
+</body>
+</html>
